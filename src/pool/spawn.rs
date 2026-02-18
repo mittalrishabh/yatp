@@ -176,7 +176,7 @@ pub struct Remote<T> {
     pub(crate) core: Arc<QueueCore<T>>,
 }
 
-impl<T: TaskCell + Send> Remote<T> {
+impl<T: TaskCell + Send + 'static> Remote<T> {
     pub(crate) fn new(core: Arc<QueueCore<T>>) -> Remote<T> {
         Remote { core }
     }
@@ -190,6 +190,14 @@ impl<T: TaskCell + Send> Remote<T> {
     /// Scales workers of the thread pool.
     pub fn scale_workers(&self, new_thread_count: usize) {
         self.core.scale_workers(new_thread_count)
+    }
+
+    /// Attempts to evict the lowest-priority task from the global queue if the
+    /// incoming priority is strictly higher (lower numeric value).
+    /// Only supported for priority queues; returns `None` for other queue
+    /// types.
+    pub fn try_evict_lowest(&self, incoming_priority: u64) -> Option<T> {
+        self.core.global_queue.try_evict_lowest(incoming_priority)
     }
 
     pub(crate) fn stop(&self) {

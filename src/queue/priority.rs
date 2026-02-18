@@ -40,13 +40,23 @@ pub struct TaskInjector<T> {
 
 impl<T> TaskInjector<T>
 where
-    T: TaskCell + Send,
+    T: TaskCell + Send + 'static,
 {
     /// Pushes the task cell to the queue. The schedule time in the extras is
     /// assigned to be now.
     pub fn push(&self, mut task_cell: T) {
         let priority = self.task_manager.prepare_before_push(&mut task_cell);
         self.queue.push(task_cell, priority);
+    }
+
+    /// Attempts to evict the lowest-priority task from the queue if the
+    /// incoming priority is strictly higher (lower numeric value).
+    /// Returns `Some(task)` on successful eviction, `None` otherwise.
+    pub fn try_evict(&self, incoming_priority: u64) -> Option<T> {
+        match self.queue.try_evict_for_priority(incoming_priority) {
+            Ok(Some(task)) => Some(task),
+            _ => None,
+        }
     }
 }
 
@@ -132,6 +142,32 @@ impl<T: TaskCell + Send + 'static> QueueCore<T> {
         self.pq
             .pop_front()
             .map(|e| into_pop(e.value().take().unwrap()))
+    }
+
+    /// If the incoming priority is strictly higher (lower numeric value) than
+    /// the lowest-priority task in the queue, evict that task and return it.
+    /// Returns `Ok(Some(task))` on successful eviction, `Ok(None)` if the
+    /// queue is empty, or `Err(())` if the incoming priority is not strictly
+    /// higher than the lowest-priority queued task.
+    fn try_evict_for_priority(&self, incoming_priority: u64) -> Result<Option<T>, ()> {
+        let back = match self.pq.back() {
+            Some(entry) => entry,
+            None => return Ok(None),
+        };
+        if incoming_priority < back.key().0 {
+            // The incoming task has strictly higher priority (lower value).
+            // Drop the back entry reference before popping to avoid holding it.
+            drop(back);
+            if let Some(entry) = self.pq.pop_back() {
+                if let Some(task) = entry.value().take() {
+                    return Ok(Some(task));
+                }
+            }
+            // Race: someone else popped it; queue now has space.
+            Ok(None)
+        } else {
+            Err(()) // incoming is not higher priority
+        }
     }
 
     #[inline]
@@ -427,6 +463,135 @@ mod tests {
         cleanup();
         cleanup();
         assert_eq!(mgr.get_elapsed(1).as_duration(), Duration::from_secs(0));
+    }
+
+    #[test]
+    fn test_evict_higher_priority() {
+        // Push tasks with priorities 10, 20, 30. Evicting with priority 5
+        // should return the task with priority 30 (the lowest-priority / highest
+        // numeric value).
+        let builder = Builder::new(Config::default(), Arc::new(OrderByIdProvider));
+        let (injector, _) = builder.build_raw::<MockTask>(1);
+
+        // task_id is used as priority by OrderByIdProvider
+        injector.push(MockTask::new(0, 20));
+        injector.push(MockTask::new(0, 10));
+        injector.push(MockTask::new(0, 30));
+
+        // Evict with priority 5 (higher than all queued tasks)
+        let evicted = injector.try_evict(5);
+        assert!(evicted.is_some());
+        let mut evicted_task = evicted.unwrap();
+        assert_eq!(evicted_task.mut_extras().task_id(), 30);
+
+        // Two tasks remain
+        let mut t1 = injector.queue.pop().unwrap().task_cell;
+        assert_eq!(t1.mut_extras().task_id(), 10);
+        let mut t2 = injector.queue.pop().unwrap().task_cell;
+        assert_eq!(t2.mut_extras().task_id(), 20);
+        assert!(injector.queue.pop().is_none());
+    }
+
+    #[test]
+    fn test_evict_lower_priority_fails() {
+        // try_evict with priority 50 when queue has tasks at 10, 20, 30
+        // should return None because incoming is not higher priority.
+        let builder = Builder::new(Config::default(), Arc::new(OrderByIdProvider));
+        let (injector, _) = builder.build_raw::<MockTask>(1);
+
+        injector.push(MockTask::new(0, 10));
+        injector.push(MockTask::new(0, 20));
+        injector.push(MockTask::new(0, 30));
+
+        let evicted = injector.try_evict(50);
+        assert!(evicted.is_none());
+
+        // All three tasks should still be in the queue
+        assert!(injector.queue.pop().is_some());
+        assert!(injector.queue.pop().is_some());
+        assert!(injector.queue.pop().is_some());
+        assert!(injector.queue.pop().is_none());
+    }
+
+    #[test]
+    fn test_evict_empty_queue() {
+        let builder = Builder::new(Config::default(), Arc::new(OrderByIdProvider));
+        let (injector, _) = builder.build_raw::<MockTask>(1);
+
+        let evicted = injector.try_evict(5);
+        assert!(evicted.is_none());
+    }
+
+    #[test]
+    fn test_evict_equal_priority_fails() {
+        // try_evict with same priority as lowest task should fail
+        // (must be strictly higher).
+        let builder = Builder::new(Config::default(), Arc::new(OrderByIdProvider));
+        let (injector, _) = builder.build_raw::<MockTask>(1);
+
+        injector.push(MockTask::new(0, 10));
+
+        let evicted = injector.try_evict(10);
+        // Equal priority — sequence number of existing task may differ, but
+        // the priority component (key.0) is equal, so eviction should fail.
+        assert!(evicted.is_none());
+    }
+
+    #[test]
+    fn test_evict_concurrent_stress() {
+        // Concurrent push/evict stress test — should not panic or deadlock.
+        use std::sync::atomic::AtomicUsize;
+
+        let builder = Builder::new(Config::default(), Arc::new(OrderByIdProvider));
+        let (injector, _) = builder.build_raw::<MockTask>(1);
+        let injector = Arc::new(injector);
+        let evicted_count = Arc::new(AtomicUsize::new(0));
+
+        let mut handles = vec![];
+
+        // Spawn pushers
+        for t in 0..4 {
+            let inj = injector.clone();
+            let h = thread::spawn(move || {
+                for i in 0..100 {
+                    inj.push(MockTask::new(0, (t * 1000 + i) as u64));
+                }
+            });
+            handles.push(h);
+        }
+
+        // Spawn evictors
+        for _ in 0..4 {
+            let inj = injector.clone();
+            let cnt = evicted_count.clone();
+            let h = thread::spawn(move || {
+                for _ in 0..100 {
+                    if inj.try_evict(0).is_some() {
+                        cnt.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            });
+            handles.push(h);
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // Drain remaining
+        let mut remaining = 0;
+        while injector.queue.pop().is_some() {
+            remaining += 1;
+        }
+
+        // Total pushed: 400. evicted + remaining should equal 400.
+        assert_eq!(
+            evicted_count.load(Ordering::Relaxed) + remaining,
+            400,
+            "evicted={} remaining={} total should be 400",
+            evicted_count.load(Ordering::Relaxed),
+            remaining
+        );
     }
 
     #[test]
