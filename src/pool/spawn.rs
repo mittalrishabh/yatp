@@ -194,9 +194,20 @@ impl<T: TaskCell + Send + 'static> Remote<T> {
 
     /// Attempts to evict the lowest-priority task from the global queue if the
     /// incoming priority is strictly higher (lower numeric value).
-    /// Only supported for priority queues; returns `None` for other queue
-    /// types.
+    ///
+    /// Returns `Some(task)` on successful eviction, or `None` if:
+    /// - The pool is shut down.
+    /// - The queue is empty.
+    /// - The incoming priority is not strictly higher than the lowest queued.
+    /// - A concurrent caller already removed the candidate (best-effort).
+    /// - The pool does not use a priority queue.
+    ///
+    /// Callers may retry on `None` if they need stronger guarantees under
+    /// contention.
     pub fn try_evict_lowest(&self, incoming_priority: u64) -> Option<T> {
+        if self.core.is_shutdown() {
+            return None;
+        }
         self.core.global_queue.try_evict_lowest(incoming_priority)
     }
 

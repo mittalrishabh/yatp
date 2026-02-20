@@ -147,23 +147,28 @@ impl<T: TaskCell + Send + 'static> QueueCore<T> {
     /// If the incoming priority is strictly higher (lower numeric value) than
     /// the lowest-priority task in the queue, evict that task and return it.
     /// Returns `Ok(Some(task))` on successful eviction, `Ok(None)` if the
-    /// queue is empty, or `Err(())` if the incoming priority is not strictly
-    /// higher than the lowest-priority queued task.
+    /// queue is empty or a concurrent caller removed the back entry first,
+    /// or `Err(())` if the incoming priority is not strictly higher than the
+    /// lowest-priority queued task.
+    ///
+    /// This is best-effort under contention: a concurrent removal between
+    /// `back()` and `remove()` causes this call to return `Ok(None)` even
+    /// though the new back may still qualify. Callers may retry if needed.
     fn try_evict_for_priority(&self, incoming_priority: u64) -> Result<Option<T>, ()> {
         let back = match self.pq.back() {
             Some(entry) => entry,
             None => return Ok(None),
         };
         if incoming_priority < back.key().0 {
-            // The incoming task has strictly higher priority (lower value).
-            // Drop the back entry reference before popping to avoid holding it.
-            drop(back);
-            if let Some(entry) = self.pq.pop_back() {
-                if let Some(task) = entry.value().take() {
+            // Atomically remove this specific entry. If a concurrent caller
+            // already removed it, `remove()` returns false and we avoid
+            // accidentally evicting a different (possibly higher-priority) task.
+            if back.remove() {
+                if let Some(task) = back.value().take() {
                     return Ok(Some(task));
                 }
             }
-            // Race: someone else popped it; queue now has space.
+            // Race: a concurrent caller already removed this entry.
             Ok(None)
         } else {
             Err(()) // incoming is not higher priority
@@ -591,6 +596,67 @@ mod tests {
             "evicted={} remaining={} total should be 400",
             evicted_count.load(Ordering::Relaxed),
             remaining
+        );
+    }
+
+    #[test]
+    fn test_evict_concurrent_priority_contract() {
+        // Verify the strict-priority contract under concurrency: every evicted
+        // task must have priority strictly greater than the incoming_priority
+        // used by the evictor that returned it.  This catches the TOCTOU race
+        // where a concurrent removal exposes a new back entry whose priority
+        // is <= the caller's incoming_priority.
+        use std::sync::atomic::AtomicBool;
+
+        let builder = Builder::new(Config::default(), Arc::new(OrderByIdProvider));
+        let (injector, _) = builder.build_raw::<MockTask>(1);
+        let injector = Arc::new(injector);
+        let contract_violated = Arc::new(AtomicBool::new(false));
+
+        let mut handles = vec![];
+
+        // Pushers: add tasks with priorities 1..=500 per thread (offset by
+        // thread id) so that the queue always contains values near and
+        // overlapping with every evictor's incoming_priority.
+        for t in 0..4 {
+            let inj = injector.clone();
+            let h = thread::spawn(move || {
+                for i in 0..500 {
+                    let priority = (i + 1 + t) as u64;
+                    inj.push(MockTask::new(0, priority));
+                }
+            });
+            handles.push(h);
+        }
+
+        // Evictors with varying incoming priorities that sit inside the
+        // pushed range, creating frequent boundary overlap.
+        let incoming_priorities: Vec<u64> = vec![25, 100, 250, 400];
+        for incoming in incoming_priorities {
+            let inj = injector.clone();
+            let violated = contract_violated.clone();
+            let h = thread::spawn(move || {
+                for _ in 0..500 {
+                    if let Some(mut task) = inj.try_evict(incoming) {
+                        let evicted_priority = task.mut_extras().task_id();
+                        if evicted_priority <= incoming {
+                            violated.store(true, Ordering::Relaxed);
+                        }
+                    }
+                }
+            });
+            handles.push(h);
+        }
+
+        for h in handles {
+            if let Err(payload) = h.join() {
+                std::panic::resume_unwind(payload);
+            }
+        }
+
+        assert!(
+            !contract_violated.load(Ordering::Relaxed),
+            "evicted a task whose priority was <= the evictor's incoming_priority"
         );
     }
 
