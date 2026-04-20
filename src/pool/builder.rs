@@ -73,7 +73,6 @@ pub struct LazyBuilder<T> {
     builder: Builder,
     core: Arc<QueueCore<T>>,
     local_queues: Vec<LocalQueue<T>>,
-    slot_controller: Option<Arc<dyn SlotControl>>,
 }
 
 impl<T> LazyBuilder<T> {
@@ -81,12 +80,6 @@ impl<T> LazyBuilder<T> {
     /// format "prefix-index".
     pub fn name(mut self, name_prefix: impl Into<String>) -> LazyBuilder<T> {
         self.builder.name_prefix = name_prefix.into();
-        self
-    }
-
-    /// Sets the slot controller for concurrency limiting.
-    pub fn slot_controller(mut self, sc: Arc<dyn SlotControl>) -> LazyBuilder<T> {
-        self.slot_controller = Some(sc);
         self
     }
 }
@@ -114,7 +107,7 @@ where
                 builder = builder.stack_size(size)
             }
             let local = Local::new(i + 1, local_queue, self.core.clone());
-            let thd = WorkerThread::with_slot_controller(local, runner, self.slot_controller.clone());
+            let thd = WorkerThread::with_slot_controller(local, runner, self.builder.slot_controller.clone());
             threads.push(
                 builder
                     .spawn(move || {
@@ -136,6 +129,7 @@ pub struct Builder {
     name_prefix: String,
     stack_size: Option<usize>,
     sched_config: SchedConfig,
+    slot_controller: Option<Arc<dyn SlotControl>>,
 }
 
 impl Builder {
@@ -143,9 +137,16 @@ impl Builder {
     pub fn new(name_prefix: impl Into<String>) -> Builder {
         Builder {
             name_prefix: name_prefix.into(),
+            slot_controller: None,
             stack_size: None,
             sched_config: SchedConfig::default(),
         }
+    }
+
+    /// Sets the slot controller for concurrency limiting.
+    pub fn slot_controller(&mut self, sc: Arc<dyn SlotControl>) -> &mut Self {
+        self.slot_controller = Some(sc);
+        self
     }
 
     /// Sets the maximum number of running threads at the same time.
@@ -267,7 +268,6 @@ impl Builder {
                 builder: self.clone(),
                 core,
                 local_queues,
-                slot_controller: None,
             },
         )
     }
