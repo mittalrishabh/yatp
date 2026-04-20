@@ -1,17 +1,35 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
-use crate::pool::{Local, Runner};
+use crate::pool::{Local, Runner, SlotControl};
 use crate::queue::{Pop, TaskCell};
 use parking_lot_core::SpinWait;
+use std::sync::Arc;
 
 pub(crate) struct WorkerThread<T, R> {
     local: Local<T>,
     runner: R,
+    slot_controller: Option<Arc<dyn SlotControl>>,
 }
 
 impl<T, R> WorkerThread<T, R> {
     pub fn new(local: Local<T>, runner: R) -> WorkerThread<T, R> {
-        WorkerThread { local, runner }
+        WorkerThread {
+            local,
+            runner,
+            slot_controller: None,
+        }
+    }
+
+    pub fn with_slot_controller(
+        local: Local<T>,
+        runner: R,
+        slot_controller: Option<Arc<dyn SlotControl>>,
+    ) -> WorkerThread<T, R> {
+        WorkerThread {
+            local,
+            runner,
+            slot_controller,
+        }
     }
 }
 
@@ -41,6 +59,12 @@ where
     pub fn run(mut self) {
         self.runner.start(&mut self.local);
         while !self.local.core().is_shutdown() {
+            if let Some(ref sc) = self.slot_controller {
+                if !sc.has_capacity() {
+                    std::thread::yield_now();
+                    continue;
+                }
+            }
             let task = match self.pop() {
                 Some(t) => t,
                 None => continue,

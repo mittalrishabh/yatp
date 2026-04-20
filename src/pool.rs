@@ -15,6 +15,14 @@ pub use self::runner::{CloneRunnerBuilder, Runner, RunnerBuilder};
 pub(crate) use self::spawn::WeakRemote;
 pub use self::spawn::{build_spawn, Local, Remote};
 
+/// Trait for controlling the number of concurrently executing tasks in the pool.
+/// Implement this to gate task execution based on CPU or other signals.
+/// Acquire and release are managed by the caller (e.g. future wrapper); yatp only checks capacity.
+pub trait SlotControl: Send + Sync {
+    /// Returns true if there is capacity to run another task.
+    fn has_capacity(&self) -> bool;
+}
+
 use crate::queue::{TaskCell, WithExtras};
 use std::mem;
 use std::sync::Mutex;

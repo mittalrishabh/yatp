@@ -2,7 +2,7 @@
 
 use crate::pool::spawn::QueueCore;
 use crate::pool::worker::WorkerThread;
-use crate::pool::{CloneRunnerBuilder, Local, Remote, Runner, RunnerBuilder, ThreadPool};
+use crate::pool::{CloneRunnerBuilder, Local, Remote, Runner, RunnerBuilder, SlotControl, ThreadPool};
 use crate::queue::{self, multilevel, priority, LocalQueue, QueueType, TaskCell};
 use crate::task::{callback, future};
 use std::sync::{
@@ -73,6 +73,7 @@ pub struct LazyBuilder<T> {
     builder: Builder,
     core: Arc<QueueCore<T>>,
     local_queues: Vec<LocalQueue<T>>,
+    slot_controller: Option<Arc<dyn SlotControl>>,
 }
 
 impl<T> LazyBuilder<T> {
@@ -80,6 +81,12 @@ impl<T> LazyBuilder<T> {
     /// format "prefix-index".
     pub fn name(mut self, name_prefix: impl Into<String>) -> LazyBuilder<T> {
         self.builder.name_prefix = name_prefix.into();
+        self
+    }
+
+    /// Sets the slot controller for concurrency limiting.
+    pub fn slot_controller(mut self, sc: Arc<dyn SlotControl>) -> LazyBuilder<T> {
+        self.slot_controller = Some(sc);
         self
     }
 }
@@ -107,7 +114,7 @@ where
                 builder = builder.stack_size(size)
             }
             let local = Local::new(i + 1, local_queue, self.core.clone());
-            let thd = WorkerThread::new(local, runner);
+            let thd = WorkerThread::with_slot_controller(local, runner, self.slot_controller.clone());
             threads.push(
                 builder
                     .spawn(move || {
@@ -260,6 +267,7 @@ impl Builder {
                 builder: self.clone(),
                 core,
                 local_queues,
+                slot_controller: None,
             },
         )
     }
