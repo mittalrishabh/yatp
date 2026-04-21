@@ -16,11 +16,14 @@ pub(crate) use self::spawn::WeakRemote;
 pub use self::spawn::{build_spawn, Local, Remote};
 
 /// Trait for controlling the number of concurrently executing tasks in the pool.
-/// Implement this to gate task execution based on CPU or other signals.
-/// Acquire and release are managed by the caller (e.g. future wrapper); yatp only checks capacity.
+/// yatp calls acquire before polling a task and release after (on suspend or completion).
 pub trait SlotControl: Send + Sync {
-    /// Returns true if there is capacity to run another task.
+    /// Returns true if there is capacity to start polling a new task.
     fn has_capacity(&self) -> bool;
+    /// Called by yatp immediately before polling a task.
+    fn acquire(&self);
+    /// Called by yatp immediately after polling a task (both suspend and completion).
+    fn release(&self);
 }
 
 use crate::queue::{TaskCell, WithExtras};
