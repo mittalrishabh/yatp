@@ -18,11 +18,11 @@ pub use self::spawn::{build_spawn, Local, Remote};
 /// Trait for controlling the number of concurrently executing tasks in the pool.
 /// yatp calls acquire before polling a task and release after (on suspend or completion).
 pub trait SlotControl: Send + Sync {
-    /// Returns true if there is capacity to start polling a new task.
-    fn has_capacity(&self) -> bool;
-    /// Called by yatp immediately before polling a task.
-    fn acquire(&self);
-    /// Called by yatp immediately after polling a task (both suspend and completion).
+    /// Atomically increments in-flight and returns true if within capacity.
+    /// If false, the caller must not proceed and should call release().
+    fn acquire(&self) -> bool;
+    /// Called by yatp immediately after polling a task (both suspend and completion),
+    /// or when acquire() returned false.
     fn release(&self);
 }
 

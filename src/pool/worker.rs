@@ -60,18 +60,20 @@ where
         self.runner.start(&mut self.local);
         while !self.local.core().is_shutdown() {
             if let Some(ref sc) = self.slot_controller {
-                if !sc.has_capacity() {
+                if !sc.acquire() {
                     std::thread::yield_now();
                     continue;
                 }
             }
             let task = match self.pop() {
                 Some(t) => t,
-                None => continue,
+                None => {
+                    if let Some(ref sc) = self.slot_controller {
+                        sc.release();
+                    }
+                    continue;
+                }
             };
-            if let Some(ref sc) = self.slot_controller {
-                sc.acquire();
-            }
             self.runner.handle(&mut self.local, task.task_cell);
             if let Some(ref sc) = self.slot_controller {
                 sc.release();
