@@ -1,6 +1,6 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
-use crate::pool::{Local, Runner, SlotControl};
+use crate::pool::{Local, Runner, SlotController};
 use crate::queue::{Pop, TaskCell};
 use parking_lot_core::SpinWait;
 use std::sync::Arc;
@@ -8,7 +8,7 @@ use std::sync::Arc;
 pub(crate) struct WorkerThread<T, R> {
     local: Local<T>,
     runner: R,
-    slot_controller: Option<Arc<dyn SlotControl>>,
+    slot_controller: Option<Arc<SlotController>>,
 }
 
 impl<T, R> WorkerThread<T, R> {
@@ -23,7 +23,7 @@ impl<T, R> WorkerThread<T, R> {
     pub fn with_slot_controller(
         local: Local<T>,
         runner: R,
-        slot_controller: Option<Arc<dyn SlotControl>>,
+        slot_controller: Option<Arc<SlotController>>,
     ) -> WorkerThread<T, R> {
         WorkerThread {
             local,
@@ -59,21 +59,13 @@ where
     pub fn run(mut self) {
         self.runner.start(&mut self.local);
         while !self.local.core().is_shutdown() {
-            if let Some(ref sc) = self.slot_controller {
-                if !sc.acquire() {
-                    std::thread::yield_now();
-                    continue;
-                }
-            }
             let task = match self.pop() {
                 Some(t) => t,
-                None => {
-                    if let Some(ref sc) = self.slot_controller {
-                        sc.release();
-                    }
-                    continue;
-                }
+                None => continue,
             };
+            if let Some(ref sc) = self.slot_controller {
+                sc.acquire();
+            }
             self.runner.handle(&mut self.local, task.task_cell);
             if let Some(ref sc) = self.slot_controller {
                 sc.release();

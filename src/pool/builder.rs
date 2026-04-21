@@ -2,7 +2,7 @@
 
 use crate::pool::spawn::QueueCore;
 use crate::pool::worker::WorkerThread;
-use crate::pool::{CloneRunnerBuilder, Local, Remote, Runner, RunnerBuilder, SlotControl, ThreadPool};
+use crate::pool::{CloneRunnerBuilder, Local, Remote, Runner, RunnerBuilder, SlotController, ThreadPool};
 use crate::queue::{self, multilevel, priority, LocalQueue, QueueType, TaskCell};
 use crate::task::{callback, future};
 use std::sync::{
@@ -129,7 +129,7 @@ pub struct Builder {
     name_prefix: String,
     stack_size: Option<usize>,
     sched_config: SchedConfig,
-    slot_controller: Option<Arc<dyn SlotControl>>,
+    slot_controller: Option<Arc<SlotController>>,
 }
 
 impl Builder {
@@ -144,7 +144,7 @@ impl Builder {
     }
 
     /// Sets the slot controller for concurrency limiting.
-    pub fn slot_controller(&mut self, sc: Arc<dyn SlotControl>) -> &mut Self {
+    pub fn slot_controller(&mut self, sc: Arc<SlotController>) -> &mut Self {
         self.slot_controller = Some(sc);
         self
     }
