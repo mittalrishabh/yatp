@@ -59,17 +59,14 @@ where
     pub fn run(mut self) {
         self.runner.start(&mut self.local);
         while !self.local.core().is_shutdown() {
+            if let Some(ref sc) = self.slot_controller {
+                sc.acquire();
+            }
             let task = match self.pop() {
                 Some(t) => t,
                 None => continue,
             };
-            if let Some(ref sc) = self.slot_controller {
-                sc.acquire();
-            }
             self.runner.handle(&mut self.local, task.task_cell);
-            if let Some(ref sc) = self.slot_controller {
-                sc.release();
-            }
         }
         self.runner.end(&mut self.local);
 

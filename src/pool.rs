@@ -13,7 +13,7 @@ mod worker;
 
 pub use self::builder::{Builder, SchedConfig};
 pub use self::runner::{CloneRunnerBuilder, Runner, RunnerBuilder};
-pub use self::slot_controller::SlotController;
+pub use self::slot_controller::{SlotController, SlotGuard};
 pub(crate) use self::spawn::WeakRemote;
 pub use self::spawn::{build_spawn, Local, Remote};
 

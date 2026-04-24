@@ -1,8 +1,19 @@
 // Copyright 2024 TiKV Project Authors. Licensed under Apache-2.0.
 
-use parking_lot_core::{ParkResult, ParkToken, UnparkToken};
+use parking_lot_core::{ParkToken, UnparkToken};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+
+/// RAII guard that releases a slot on drop.
+pub struct SlotGuard {
+    controller: Arc<SlotController>,
+}
+
+impl Drop for SlotGuard {
+    fn drop(&mut self) {
+        self.controller.release();
+    }
+}
 
 /// CockroachDB-style CPU-based slot controller.
 /// Limits concurrent task execution based on available CPU capacity.
@@ -37,6 +48,14 @@ impl SlotController {
 
     pub fn in_flight(&self) -> usize {
         self.in_flight.load(Ordering::Relaxed)
+    }
+
+    /// Acquires a slot and returns a guard that releases it on drop.
+    pub fn acquire_guard(self: &Arc<Self>) -> SlotGuard {
+        self.acquire();
+        SlotGuard {
+            controller: self.clone(),
+        }
     }
 
     /// Acquires a slot. Parks the calling thread if over capacity until a slot
